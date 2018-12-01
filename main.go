@@ -32,6 +32,7 @@ var jsonFlag = flag.Bool("json", false, "output location in JSON format (-t flag
 var renamegodef = flag.String("s", "godef", "in case you want to rename you godef,,,en or use the other tool instead of godef")
 var prefire = flag.Bool("p", false, "in case you want to store all symbols of a specified package")
 var predefinedPackage = flag.String("h", "", "important to boost, when you confirm that one identifier is the name of one package")
+var flushSymbol = flag.Bool("x", false, "flush symbol")
 
 //mongo
 var (
@@ -64,9 +65,11 @@ func modifyOffset(src []byte) {
 		}
 	}
 }
+
 func Find() {
 
 }
+
 func getpackagename(src []byte) string {
 
 	pIdx := bytes.Index(src, []byte{'p', 'a', 'c', 'k', 'a', 'g', 'e'})
@@ -76,6 +79,7 @@ func getpackagename(src []byte) string {
 	}
 	return string(packagenamebytes)
 }
+
 func modifyMD5(src []byte) string {
 	packagename := getpackagename(src)
 	// go ahead
@@ -94,6 +98,7 @@ func modifyMD5(src []byte) string {
 			break
 		}
 	}
+
 	if backIdx == headIdx {
 		return ""
 	}
@@ -111,6 +116,7 @@ func modifyMD5(src []byte) string {
 		// a local-variable
 		return "......"
 	}
+
 	if dotNum == 1 {
 		segs := strings.Split(qualifiedidName, ".")
 		if n, _ := getSession().DB(dataBase).C(collection).Find(bson.M{"_id": segs[0]}).Count(); n == 0 {
@@ -145,6 +151,7 @@ func notLetter(c byte) bool {
 	}
 	return true
 }
+
 func md55(input string, inputbytes []byte) string {
 	md5Ctx := md5.New()
 	md5Ctx.Write([]byte(input))
@@ -152,6 +159,7 @@ func md55(input string, inputbytes []byte) string {
 	cipherStr := md5Ctx.Sum(nil)
 	return hex.EncodeToString(cipherStr)
 }
+
 func genFlagMD5() {
 	flagStr := ""
 	flagStr += fmt.Sprintf("%v\n", *readStdin)
@@ -170,6 +178,7 @@ func genFlagMD5() {
 type godefcache struct {
 	Raw string
 }
+
 type godefname struct {
 	Name string
 }
@@ -206,6 +215,7 @@ func fprefire() {
 	}
 
 }
+
 func main() {
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "usage: godefcache [flags] [expr]\n")
@@ -216,11 +226,13 @@ func main() {
 		flag.Usage()
 		os.Exit(2)
 	}
+
 	fprefire()
 	if *renamegodef != "godef" {
 		getSession().DB(dataBase).C(collection).Upsert(bson.M{"_id": "toolname"}, bson.M{"$set": bson.M{"name": *renamegodef}})
 		success(*renamegodef)
 	}
+
 	if *predefinedPackage != "" {
 		if strings.HasPrefix(*predefinedPackage, "add:") {
 			packagename := strings.TrimPrefix(*predefinedPackage, "add:")
@@ -229,58 +241,105 @@ func main() {
 			}{packagename})
 			success(*predefinedPackage)
 		}
+
 		if strings.HasPrefix(*predefinedPackage, "del:") {
 			packagename := strings.TrimPrefix(*predefinedPackage, "del:")
 			getSession().DB(dataBase).C(collection).RemoveId(packagename)
 			success(*predefinedPackage)
 		}
+
 		fail("add:[packagename]  or  del:[packagename]")
 	}
+
 	var src []byte
 	if !(*readStdin) {
 		fail("%v", "Only support stdin now....")
 	} else {
 		src, _ = ioutil.ReadFile(*fflag)
 	}
+
 	src = append(src, ' ') // for robust
 	modifyOffset(src)
 	unique := modifyMD5(src)
 	if unique == "" {
 		success("xxx")
 	}
+
 	if !(unique == "......") {
 		gFlagMD5 = md55(unique, nil)
 	} else {
 		genFlagMD5()
 		gFlagMD5 = md55(gFlagMD5, src)
 	}
+
+	if *flushSymbol {
+		// 获取原始的godef
+		outString, err := execDefOrigin(src)
+		if err != nil {
+			fail("%v", err.Error()+"[  --  ]"+outString)
+		} else {
+			selector := bson.M{"_id": gFlagMD5}
+			getSession().DB(dataBase).C(collection).Update(selector, bson.M{"raw": outString})
+		}
+
+		os.Exit(0)
+	}
 	// success(unique)
 	// dealWithPredefinedpackage(src)
 	var result godefcache
 	if err := getSession().DB(dataBase).C(collection).Find(bson.M{"_id": gFlagMD5}).One(&result); err != nil {
-		var cmdstr string
-		cmdstdin := bytes.NewBuffer(src)
+		outString, err := execDefOrigin(src)
+		if err == nil {
+			getSession().DB(dataBase).C(collection).Insert(bson.M{"_id": gFlagMD5, "raw": outString})
+			success(outString)
+		} else {
+			fail("%v", err.Error()+"[  --  ]"+outString)
+		}
+	} else {
+		args := append(os.Args[1:], "-x")
+
+		cmdstdin := bytes.NewBuffer([]byte{})
 		cmdstdout := bytes.NewBuffer([]byte{})
 		cmdstderr := bytes.NewBuffer([]byte{})
-		var godefnameresult godefname
-		if err := getSession().DB(dataBase).C(collection).Find(bson.M{"_id": "toolname"}).One(&godefnameresult); err != nil {
-			cmdstr = "godef"
-		} else {
-			cmdstr = godefnameresult.Name
-		}
-		godefcmd := exec.Command(cmdstr, "-i", "-t", "-o", fmt.Sprintf("%v", *offset), "-f", fmt.Sprintf("%v", *fflag))
+
+		godefcmd := exec.Command(os.Args[0], args...)
 		godefcmd.Stdin = cmdstdin
 		godefcmd.Stdout = cmdstdout
 		godefcmd.Stderr = cmdstderr
-		if err := godefcmd.Run(); err == nil {
-			raw := cmdstdout.String()
-			getSession().DB(dataBase).C(collection).Insert(bson.M{"_id": gFlagMD5, "raw": raw})
-			success(raw)
-		} else {
-			fail("%v", err.Error()+"[  --  ]"+string(cmdstderr.Bytes()))
-		}
+
+		godefcmd.Start()
 	}
+
 	success(result.Raw)
+}
+
+func getDefOrigin() string {
+	var cmdstr string
+	var godefnameresult godefname
+	if err := getSession().DB(dataBase).C(collection).Find(bson.M{"_id": "toolname"}).One(&godefnameresult); err != nil {
+		cmdstr = "godef"
+	} else {
+		cmdstr = godefnameresult.Name
+	}
+
+	return cmdstr
+}
+
+func execDefOrigin(src []byte) (string, error) {
+	cmdstdin := bytes.NewBuffer(src)
+	cmdstdout := bytes.NewBuffer([]byte{})
+	cmdstderr := bytes.NewBuffer([]byte{})
+
+	godefcmd := exec.Command(getDefOrigin(), "-i", "-t", "-o", fmt.Sprintf("%v", *offset), "-f", fmt.Sprintf("%v", *fflag))
+	godefcmd.Stdin = cmdstdin
+	godefcmd.Stdout = cmdstdout
+	godefcmd.Stderr = cmdstderr
+
+	err := godefcmd.Run()
+	if err == nil {
+		return cmdstdout.String(), nil
+	}
+	return string(cmdstderr.Bytes()), err
 }
 
 ///////////////////////////////////////////
@@ -288,6 +347,7 @@ func fail(s string, a ...interface{}) {
 	fmt.Fprint(os.Stderr, "godef: "+fmt.Sprintf(s, a...)+"\n")
 	os.Exit(2)
 }
+
 func success(s string) {
 	fmt.Fprint(os.Stdout, s)
 	os.Exit(0)
